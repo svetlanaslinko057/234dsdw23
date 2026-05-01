@@ -14,6 +14,8 @@ import {
   Search, RefreshCw, CheckCircle2, RotateCw, XCircle,
   AlertTriangle, User, FolderKanban, ExternalLink,
 } from 'lucide-react';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { useToast } from '@/components/Toast';
 
 const STATUS_CHIP = {
   in_progress: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
@@ -64,7 +66,10 @@ export default function AdminV2Workflow() {
 
   useEffect(() => { load(); }, [load]);
 
-  const qaAction = async (moduleId, action) => {
+  const [pending, setPending] = useState(null); // for revision/reject confirms
+  const { toast } = useToast();
+
+  const runQA = useCallback(async (moduleId, action, title) => {
     setBusy(`${moduleId}:${action}`);
     try {
       await axios.post(
@@ -72,22 +77,50 @@ export default function AdminV2Workflow() {
         {},
         { withCredentials: true },
       );
+      const verbDone = action === 'approve' ? 'approved' : action === 'revision' ? 'sent to revision' : 'rejected';
+      toast.success(`Module ${verbDone}`, { description: title });
       await load();
     } catch (e) {
       const detail = e?.response?.data?.detail;
       if (e?.response?.status === 409) {
         const msg = typeof detail === 'object'
-          ? `${detail.message} (${detail.current_status})`
+          ? `${detail.message || 'Already decided'} (${detail.current_status || ''})`
           : 'Already decided';
-        alert(`Already decided: ${msg}`);
+        toast.warning('Already decided', { description: msg });
         load();
       } else {
-        alert(`Action failed: ${typeof detail === 'string' ? detail : 'error'}`);
+        toast.error('Action failed', { description: typeof detail === 'string' ? detail : 'Please retry.' });
       }
     } finally {
       setBusy(null);
     }
-  };
+  }, [toast, load]);
+
+  // approve = one-tap (matches mobile)
+  const onApprove = (m) => runQA(m.id, 'approve', m.title);
+
+  const askRevision = (m) => setPending({
+    moduleId: m.id, title: m.title, action: 'revision',
+    dialogTitle: 'Send module to revision?',
+    description: `"${m.title}" will go back to the developer for rework.`,
+    confirmLabel: 'Send to revision',
+    variant: 'default',
+  });
+
+  const askReject = (m) => setPending({
+    moduleId: m.id, title: m.title, action: 'reject',
+    dialogTitle: 'Reject module?',
+    description: `"${m.title}" will be terminally rejected. No reward will be paid.`,
+    confirmLabel: 'Reject',
+    variant: 'danger',
+  });
+
+  const runPending = useCallback(async () => {
+    if (!pending) return;
+    const { moduleId, action, title } = pending;
+    setPending(null);
+    await runQA(moduleId, action, title);
+  }, [pending, runQA]);
 
   const summary = data?.summary || {};
   const items = data?.items || [];
@@ -212,7 +245,7 @@ export default function AdminV2Workflow() {
                 {isQA && m.actions?.includes('approve') && (
                   <div className="flex gap-2 shrink-0">
                     <button
-                      onClick={() => qaAction(m.id, 'approve')}
+                      onClick={() => onApprove(m)}
                       disabled={busy !== null}
                       data-testid={`approve-${m.id}`}
                       className="px-3 py-1.5 text-xs bg-[#2FE6A6] hover:bg-[#4ef0b6] text-black font-bold rounded disabled:opacity-50 flex items-center gap-1"
@@ -220,7 +253,7 @@ export default function AdminV2Workflow() {
                       <CheckCircle2 className="w-3 h-3" /> Approve
                     </button>
                     <button
-                      onClick={() => qaAction(m.id, 'revision')}
+                      onClick={() => askRevision(m)}
                       disabled={busy !== null}
                       data-testid={`revision-${m.id}`}
                       className="px-3 py-1.5 text-xs bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 font-bold rounded disabled:opacity-50 flex items-center gap-1 border border-amber-500/40"
@@ -228,7 +261,7 @@ export default function AdminV2Workflow() {
                       <RotateCw className="w-3 h-3" /> Revision
                     </button>
                     <button
-                      onClick={() => qaAction(m.id, 'reject')}
+                      onClick={() => askReject(m)}
                       disabled={busy !== null}
                       data-testid={`reject-${m.id}`}
                       className="px-3 py-1.5 text-xs bg-red-500/20 hover:bg-red-500/30 text-red-400 font-bold rounded disabled:opacity-50 flex items-center gap-1 border border-red-500/40"
@@ -259,6 +292,16 @@ export default function AdminV2Workflow() {
           Showing first {items.length} · refine search to narrow results.
         </p>
       )}
+
+      <ConfirmDialog
+        open={!!pending}
+        onOpenChange={(v) => { if (!v) setPending(null); }}
+        title={pending?.dialogTitle || ''}
+        description={pending?.description || ''}
+        confirmLabel={pending?.confirmLabel || 'Confirm'}
+        variant={pending?.variant || 'default'}
+        onConfirm={runPending}
+      />
     </div>
   );
 }

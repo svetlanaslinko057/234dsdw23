@@ -16,6 +16,8 @@ import {
   ShieldCheck, CheckCircle2, RotateCw, XCircle, AlertTriangle,
   RefreshCw, ExternalLink, ArrowRight,
 } from 'lucide-react';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { useToast } from '@/components/Toast';
 
 const STATUS_CHIP = {
   review:       'bg-amber-500/20 text-amber-400 border-amber-500/30',
@@ -43,30 +45,60 @@ export default function AdminQAPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const decide = async (item, action) => {
-    const verb = action === 'approve' ? 'Approve' : action === 'revision' ? 'Send to revision' : 'Reject';
-    if (!window.confirm(`${verb}: "${item.title}"?`)) return;
+  // Confirm dialog state for revision/reject (approve = one-tap, like mobile)
+  const [pending, setPending] = useState(null); // { item, action, title, description, confirmLabel, variant }
+  const { toast } = useToast();
+
+  const runDecision = useCallback(async (item, action) => {
     setBusy(`${item.id}:${action}`);
     try {
       await axios.post(`${API}/admin/mobile/qa/${item.id}/${action}`, {}, { withCredentials: true });
+      const verbDone = action === 'approve' ? 'approved' : action === 'revision' ? 'sent to revision' : 'rejected';
+      toast.success(`Module ${verbDone}`, { description: item.title });
       await load();
     } catch (e) {
       const detail = e?.response?.data?.detail;
       if (e?.response?.status === 409) {
         const msg = typeof detail === 'object'
-          ? `${detail.message} (${detail.current_status})`
-          : (detail || 'Already decided');
-        alert(`Already decided: ${msg}`);
+          ? `${detail.message || 'Already decided'} (${detail.current_status || ''})`
+          : 'Already decided';
+        toast.warning('Already decided', { description: msg });
         load();
       } else if (e?.response?.status === 500 && typeof detail === 'string' && detail.includes('Reward')) {
-        alert('Payment failed. Decision was rolled back. Please retry.');
+        toast.error('Payment failed', { description: 'Decision was rolled back. Please retry.' });
       } else {
-        alert(`Failed: ${typeof detail === 'string' ? detail : 'error'}`);
+        toast.error('Action failed', { description: typeof detail === 'string' ? detail : 'Please retry.' });
       }
     } finally {
       setBusy(null);
     }
-  };
+  }, [toast, load]);
+
+  // Approve = one-tap (matches mobile contract).
+  const onApprove = (item) => runDecision(item, 'approve');
+
+  const askRevision = (item) => setPending({
+    item, action: 'revision',
+    title: 'Send module to revision?',
+    description: `"${item.title}" will go back to the developer for rework.`,
+    confirmLabel: 'Send to revision',
+    variant: 'default',
+  });
+
+  const askReject = (item) => setPending({
+    item, action: 'reject',
+    title: 'Reject module?',
+    description: `"${item.title}" will be terminally rejected. No reward will be paid.`,
+    confirmLabel: 'Reject',
+    variant: 'danger',
+  });
+
+  const runPending = useCallback(async () => {
+    if (!pending) return;
+    const { item, action } = pending;
+    setPending(null);
+    await runDecision(item, action);
+  }, [pending, runDecision]);
 
   return (
     <div className="p-6 max-w-5xl mx-auto" data-testid="admin-qa">
@@ -160,7 +192,7 @@ export default function AdminQAPage() {
                     <div className="flex gap-2 shrink-0">
                       {item.actions.includes('approve') && (
                         <button
-                          onClick={() => decide(item, 'approve')}
+                          onClick={() => onApprove(item)}
                           disabled={busy !== null}
                           data-testid={`qa-approve-${item.id}`}
                           className="px-3 py-1.5 text-xs bg-[#2FE6A6] hover:bg-[#4ef0b6] text-black font-bold rounded disabled:opacity-50 flex items-center gap-1"
@@ -171,7 +203,7 @@ export default function AdminQAPage() {
                       )}
                       {item.actions.includes('revision') && (
                         <button
-                          onClick={() => decide(item, 'revision')}
+                          onClick={() => askRevision(item)}
                           disabled={busy !== null}
                           data-testid={`qa-revision-${item.id}`}
                           className="px-3 py-1.5 text-xs bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 font-bold rounded border border-amber-500/40 disabled:opacity-50 flex items-center gap-1"
@@ -182,7 +214,7 @@ export default function AdminQAPage() {
                       )}
                       {item.actions.includes('reject') && (
                         <button
-                          onClick={() => decide(item, 'reject')}
+                          onClick={() => askReject(item)}
                           disabled={busy !== null}
                           data-testid={`qa-reject-${item.id}`}
                           className="px-3 py-1.5 text-xs bg-red-500/20 hover:bg-red-500/30 text-red-400 font-bold rounded border border-red-500/40 disabled:opacity-50 flex items-center gap-1"
@@ -211,6 +243,16 @@ export default function AdminQAPage() {
           </div>
         </>
       )}
+
+      <ConfirmDialog
+        open={!!pending}
+        onOpenChange={(v) => { if (!v) setPending(null); }}
+        title={pending?.title || ''}
+        description={pending?.description || ''}
+        confirmLabel={pending?.confirmLabel || 'Confirm'}
+        variant={pending?.variant || 'default'}
+        onConfirm={runPending}
+      />
     </div>
   );
 }
