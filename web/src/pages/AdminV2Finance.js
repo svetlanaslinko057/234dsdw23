@@ -9,7 +9,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { API } from '@/App';
 import axios from 'axios';
-import { DollarSign, Wallet, Layers, AlertTriangle, RefreshCw, TrendingUp } from 'lucide-react';
+import { DollarSign, Wallet, AlertTriangle, RefreshCw, TrendingUp } from 'lucide-react';
 import AdminEarningsControl from './AdminEarningsControl';
 import AdminWithdrawalsPage from './AdminWithdrawalsPage';
 
@@ -98,7 +98,6 @@ export default function AdminV2Finance() {
         {[
           { k: 'summary', l: 'Summary', icon: <DollarSign className="w-4 h-4" /> },
           { k: 'withdrawals', l: 'Withdrawals', icon: <Wallet className="w-4 h-4" /> },
-          { k: 'batches', l: 'Batches', icon: <Layers className="w-4 h-4" /> },
           { k: 'earnings', l: 'Earnings', icon: <TrendingUp className="w-4 h-4" /> },
         ].map((t) => (
           <button
@@ -106,7 +105,7 @@ export default function AdminV2Finance() {
             onClick={() => setTab(t.k)}
             data-testid={`tab-${t.k}`}
             className={`flex items-center gap-2 px-4 py-2 text-sm rounded transition-colors ${
-              tab === t.k ? 'bg-emerald-500 text-black font-bold' : 'text-muted-foreground hover:text-foreground'
+              tab === t.k ? 'bg-[#2FE6A6] text-black font-bold' : 'text-muted-foreground hover:text-foreground'
             }`}
           >
             {t.icon}
@@ -214,21 +213,6 @@ export default function AdminV2Finance() {
       {tab === 'earnings' && (
         <div data-testid="finance-earnings-embed">
           <AdminEarningsControl />
-        </div>
-      )}
-      {tab === 'batches' && summary && (
-        <div className="space-y-2" data-testid="finance-batches">
-          {summary.payout_batches.length === 0 && (
-            <div className="bg-card border border-border rounded-xl p-8 text-center text-muted-foreground">
-              No pending payout batches.
-            </div>
-          )}
-          {summary.payout_batches.map((b) => (
-            <div key={b.id} className="bg-card border border-border rounded-xl p-4">
-              <p className="font-bold">{b.title}</p>
-              <p className="text-xs text-muted-foreground mt-1">{b.subtitle}</p>
-            </div>
-          ))}
         </div>
       )}
     </div>

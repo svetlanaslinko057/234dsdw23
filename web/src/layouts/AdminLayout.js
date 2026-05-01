@@ -73,12 +73,12 @@ const AdminLayout = () => {
 
         <div className="p-3 border-t border-white/10">
           <div className="flex items-center gap-3 p-3 rounded-xl bg-white/5 border border-white/10">
-            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-red-500/30 to-orange-500/30 flex items-center justify-center font-semibold text-sm border border-white/10">
+            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-[#2FE6A6]/30 to-[#2FE6A6]/10 flex items-center justify-center font-semibold text-sm border border-[#2FE6A6]/20 text-[#2FE6A6]">
               {user?.name?.[0]?.toUpperCase() || 'A'}
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">{user?.name || 'Admin'}</p>
-              <p className="text-[11px] text-white/40 capitalize">Administrator</p>
+              <p className="text-[11px] text-white/40 capitalize">{user?.active_role || user?.role || 'admin'}</p>
             </div>
             <button
               onClick={handleLogout}
@@ -106,7 +106,7 @@ const NavItem = ({ to, icon, label, badge, testid }) => (
     className={({ isActive }) =>
       `flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
         isActive
-          ? 'bg-gradient-to-r from-red-500/20 to-orange-500/10 text-foreground border border-red-500/20'
+          ? 'bg-[#2FE6A6]/10 text-[#2FE6A6] border border-[#2FE6A6]/30'
           : 'text-muted-foreground hover:text-foreground hover:bg-muted'
       }`
     }

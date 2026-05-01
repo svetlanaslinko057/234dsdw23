@@ -673,8 +673,232 @@ def init_router(db, get_current_user_dep, require_role_dep, realtime=None):
             },
             "links": [
                 {"label": "Open web admin", "web_url": _web_url("/admin/dashboard")},
-                {"label": "Audit log", "web_url": _web_url("/admin/control-center")},
+                {"label": "Audit log", "web_url": _web_url("/admin/system")},
             ],
+            "generated_at": _iso_now(),
+        }
+
+    # ============================================================
+    # WORKFLOW — single aggregate for web AdminV2Workflow (no N+1)
+    # ============================================================
+    # Groups used to keep filter semantics aligned with mobile contract.
+    WF_QA       = ["review", "qa_pending", "submitted"]
+    WF_ACTIVE   = ["in_progress", "pending"]
+    WF_DONE     = ["completed", "rejected"]
+    WF_ALL      = WF_QA + WF_ACTIVE + WF_DONE + ["blocked"]
+
+    @router.get("/admin/mobile/workflow")
+    async def workflow(
+        filter: str = "all",
+        q: str = "",
+        limit: int = 50,
+        user=Depends(require_admin),
+    ) -> Dict[str, Any]:
+        """Aggregate modules feed for web Workflow zone.
+        Returns item-contract v1 list + per-group summary.
+        """
+        # 1) Build mongo filter by group
+        mongo_filter: Dict[str, Any] = {}
+        if filter == "qa":
+            mongo_filter = {"status": {"$in": WF_QA}}
+        elif filter == "active":
+            mongo_filter = {"status": {"$in": WF_ACTIVE}}
+        elif filter == "blocked":
+            mongo_filter = {"$or": [
+                {"status": "blocked"},
+                {"flags.blocked": True},
+            ]}
+        elif filter == "done":
+            mongo_filter = {"status": {"$in": WF_DONE}}
+        else:
+            # "all" — keep broad but still bounded to known buckets
+            mongo_filter = {"$or": [
+                {"status": {"$in": WF_ALL}},
+                {"flags.blocked": True},
+            ]}
+
+        # Clamp limit
+        try:
+            limit = max(1, min(200, int(limit)))
+        except Exception:
+            limit = 50
+
+        mods = await db.modules.find(
+            mongo_filter,
+            {"_id": 0, "module_id": 1, "title": 1, "project_id": 1,
+             "assigned_to": 1, "submitted_at": 1, "created_at": 1,
+             "client_price": 1, "status": 1, "revision_count": 1,
+             "flags": 1},
+        ).sort("submitted_at", -1).limit(limit + 1).to_list(limit + 1)
+        has_more = len(mods) > limit
+        mods = mods[:limit]
+
+        # 2) Batch-enrich project + developer names
+        pids = list({m.get("project_id") for m in mods if m.get("project_id")})
+        dids = list({m.get("assigned_to") for m in mods if m.get("assigned_to")})
+        proj_map: Dict[str, str] = {}
+        dev_map: Dict[str, str] = {}
+        if pids:
+            for p in await db.projects.find(
+                {"project_id": {"$in": pids}},
+                {"_id": 0, "project_id": 1, "name": 1, "title": 1},
+            ).to_list(500):
+                proj_map[p["project_id"]] = p.get("name") or p.get("title") or ""
+        if dids:
+            for d in await db.users.find(
+                {"user_id": {"$in": dids}},
+                {"_id": 0, "user_id": 1, "name": 1, "email": 1},
+            ).to_list(500):
+                dev_map[d["user_id"]] = d.get("name") or d.get("email") or "Developer"
+
+        # 3) Optional free-text search (client-side over enriched data)
+        needle = (q or "").strip().lower()
+
+        def _matches(m: Dict[str, Any]) -> bool:
+            if not needle:
+                return True
+            mid = (m.get("module_id") or "").lower()
+            title = (m.get("title") or "").lower()
+            dev = (dev_map.get(m.get("assigned_to") or "", "") or "").lower()
+            proj = (proj_map.get(m.get("project_id") or "", "") or "").lower()
+            return any(needle in s for s in (mid, title, dev, proj))
+
+        # 4) Project items to v1 contract
+        items: List[Dict[str, Any]] = []
+        for m in mods:
+            if not _matches(m):
+                continue
+            mid = m["module_id"]
+            st = m.get("status") or ""
+            is_blocked = st == "blocked" or bool((m.get("flags") or {}).get("blocked"))
+            is_qa = st in WF_QA
+            project_title = proj_map.get(m.get("project_id") or "", "")
+            developer_name = dev_map.get(m.get("assigned_to") or "", "")
+            subtitle_parts = [s for s in [project_title, developer_name] if s]
+            actions: List[str] = []
+            primary = "open"
+            if is_qa:
+                actions = ["approve", "revision", "reject", "open"]
+                primary = "approve"
+            else:
+                actions = ["open"]
+            items.append({
+                "id": mid,
+                "title": m.get("title") or "Module",
+                "subtitle": " · ".join(subtitle_parts) or "—",
+                "status": "blocked" if is_blocked else st,
+                "created_at": m.get("submitted_at") or m.get("created_at"),
+                "meta": {
+                    "project_id": m.get("project_id"),
+                    "project_title": project_title,
+                    "developer_id": m.get("assigned_to"),
+                    "developer_name": developer_name,
+                    "client_price": float(m.get("client_price") or 0),
+                    "revision_count": int(m.get("revision_count") or 0),
+                },
+                "primary_action": primary,
+                "actions": actions,
+                "web_url": _web_url(f"/admin/workflow?module_id={mid}"),
+            })
+
+        # 5) Per-group summary — always counted over FULL buckets (no filter/q)
+        qa_n       = await db.modules.count_documents({"status": {"$in": WF_QA}})
+        active_n   = await db.modules.count_documents({"status": {"$in": WF_ACTIVE}})
+        blocked_n  = await db.modules.count_documents({"$or": [
+            {"status": "blocked"}, {"flags.blocked": True},
+        ]})
+        done_n     = await db.modules.count_documents({"status": {"$in": WF_DONE}})
+        total_n    = qa_n + active_n + blocked_n + done_n
+
+        return {
+            "items": items,
+            "summary": {
+                "total": total_n,
+                "qa": qa_n,
+                "active": active_n,
+                "blocked": blocked_n,
+                "done": done_n,
+                "has_more": has_more,
+            },
+            "generated_at": _iso_now(),
+        }
+
+    # ============================================================
+    # AUDIT LOG — read from system_actions_log
+    # ============================================================
+    @router.get("/admin/audit-log")
+    async def audit_log(
+        limit: int = 50,
+        offset: int = 0,
+        action: Optional[str] = None,
+        source: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        user=Depends(require_admin),
+    ) -> Dict[str, Any]:
+        """Paginated audit log feed for web AdminV2System → Audit tab.
+        Reads system_actions_log (written by admin_mobile + legacy writers).
+        """
+        try:
+            limit = max(1, min(200, int(limit)))
+        except Exception:
+            limit = 50
+        try:
+            offset = max(0, int(offset))
+        except Exception:
+            offset = 0
+
+        q: Dict[str, Any] = {}
+        if action:
+            q["action"] = action
+        if source:
+            q["source"] = source
+        if entity_type:
+            q["entity_type"] = entity_type
+
+        total = await db.system_actions_log.count_documents(q)
+        rows = await db.system_actions_log.find(
+            q, {"_id": 0}
+        ).sort("created_at", -1).skip(offset).limit(limit + 1).to_list(limit + 1)
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+
+        # Enrich actor email in one round-trip
+        actor_ids = list({r.get("admin_id") for r in rows if r.get("admin_id")})
+        actor_map: Dict[str, Dict[str, Any]] = {}
+        if actor_ids:
+            for u in await db.users.find(
+                {"user_id": {"$in": actor_ids}},
+                {"_id": 0, "user_id": 1, "email": 1, "name": 1},
+            ).to_list(500):
+                actor_map[u["user_id"]] = {
+                    "id": u["user_id"],
+                    "email": u.get("email") or "",
+                    "name": u.get("name") or "",
+                }
+
+        items: List[Dict[str, Any]] = []
+        for r in rows:
+            aid = r.get("admin_id")
+            actor = actor_map.get(aid) if aid else None
+            if not actor:
+                actor = {"id": aid or "", "email": "", "name": ""}
+            items.append({
+                "id": r.get("log_id") or "",
+                "action": r.get("action") or "",
+                "source": r.get("source") or "",
+                "status": r.get("status") or "",
+                "actor": actor,
+                "entity": {
+                    "type": r.get("entity_type") or "",
+                    "id": r.get("entity_id") or "",
+                },
+                "payload": r.get("payload") or {},
+                "created_at": r.get("created_at"),
+            })
+
+        return {
+            "items": items,
+            "summary": {"total": total, "has_more": has_more},
             "generated_at": _iso_now(),
         }
 

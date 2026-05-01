@@ -1,228 +1,216 @@
-import { useState, useEffect, useCallback } from 'react';
+/**
+ * Admin · QA — module QA queue (web twin of mobile /admin/qa).
+ *
+ * Source:  GET  /api/admin/mobile/qa
+ * Actions: POST /api/admin/mobile/qa/{id}/{approve|revision|reject}
+ *
+ * Item contract v1: { id, title, subtitle, status, created_at, meta,
+ *                     primary_action, actions[], web_url }
+ *
+ * Marketplace Provider QA (different concept) lives at /admin/system → Marketplace Quality.
+ */
+import { useEffect, useState, useCallback } from 'react';
 import { API } from '@/App';
 import axios from 'axios';
 import {
-  ShieldAlert, AlertTriangle, CheckCircle2, XCircle, Ban,
-  TrendingDown, Eye, Flag, Lock, Unlock, BarChart3, Users
+  ShieldCheck, CheckCircle2, RotateCw, XCircle, AlertTriangle,
+  RefreshCw, ExternalLink, ArrowRight,
 } from 'lucide-react';
 
-const AdminQAPage = () => {
-  const [overview, setOverview] = useState(null);
-  const [providers, setProviders] = useState([]);
-  const [issues, setIssues] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState('overview');
-  const [actionLoading, setActionLoading] = useState({});
+const STATUS_CHIP = {
+  review:       'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  qa_pending:   'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  submitted:    'bg-blue-500/20 text-blue-400 border-blue-500/30',
+};
 
-  const fetchData = useCallback(async () => {
+export default function AdminQAPage() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(null);
+
+  const load = useCallback(async () => {
     try {
-      const [ovRes, provRes, issRes] = await Promise.all([
-        axios.get(`${API}/admin/qa/overview`, { withCredentials: true }),
-        axios.get(`${API}/admin/qa/providers`, { withCredentials: true }),
-        axios.get(`${API}/admin/qa/issues`, { withCredentials: true })
-      ]);
-      setOverview(ovRes.data);
-      setProviders(provRes.data);
-      setIssues(issRes.data);
-    } catch (err) {
-      console.error('QA fetch error:', err);
+      setErr(null);
+      const r = await axios.get(`${API}/admin/mobile/qa`, { withCredentials: true });
+      setData(r.data);
+    } catch (e) {
+      setErr(e?.response?.data?.detail || 'Failed to load QA queue');
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  useEffect(() => { load(); }, [load]);
 
-  const handleFlag = async (providerId) => {
-    setActionLoading(p => ({ ...p, [providerId]: 'flag' }));
+  const decide = async (item, action) => {
+    const verb = action === 'approve' ? 'Approve' : action === 'revision' ? 'Send to revision' : 'Reject';
+    if (!window.confirm(`${verb}: "${item.title}"?`)) return;
+    setBusy(`${item.id}:${action}`);
     try {
-      await axios.post(`${API}/admin/qa/flag-provider`, { provider_id: providerId, reason: 'Manual review' }, { withCredentials: true });
-      await fetchData();
-    } catch (err) { console.error(err); }
-    finally { setActionLoading(p => ({ ...p, [providerId]: null })); }
+      await axios.post(`${API}/admin/mobile/qa/${item.id}/${action}`, {}, { withCredentials: true });
+      await load();
+    } catch (e) {
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 409) {
+        const msg = typeof detail === 'object'
+          ? `${detail.message} (${detail.current_status})`
+          : (detail || 'Already decided');
+        alert(`Already decided: ${msg}`);
+        load();
+      } else if (e?.response?.status === 500 && typeof detail === 'string' && detail.includes('Reward')) {
+        alert('Payment failed. Decision was rolled back. Please retry.');
+      } else {
+        alert(`Failed: ${typeof detail === 'string' ? detail : 'error'}`);
+      }
+    } finally {
+      setBusy(null);
+    }
   };
-
-  const handleLimit = async (providerId) => {
-    setActionLoading(p => ({ ...p, [providerId]: 'limit' }));
-    try {
-      await axios.post(`${API}/admin/qa/limit-provider`, { provider_id: providerId, reason: 'Low quality score' }, { withCredentials: true });
-      await fetchData();
-    } catch (err) { console.error(err); }
-    finally { setActionLoading(p => ({ ...p, [providerId]: null })); }
-  };
-
-  const handleUnlimit = async (providerId) => {
-    setActionLoading(p => ({ ...p, [providerId]: 'unlimit' }));
-    try {
-      await axios.post(`${API}/admin/qa/unlimit-provider`, { provider_id: providerId }, { withCredentials: true });
-      await fetchData();
-    } catch (err) { console.error(err); }
-    finally { setActionLoading(p => ({ ...p, [providerId]: null })); }
-  };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="w-8 h-8 border-2 border-zinc-700 border-t-red-500 rounded-full animate-spin" />
-      </div>
-    );
-  }
 
   return (
-    <div className="p-6 lg:p-8 max-w-6xl mx-auto" data-testid="admin-qa-page">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-white">Quality Control</h1>
-        <p className="text-zinc-500 text-sm mt-1">Marketplace provider quality monitoring</p>
+    <div className="p-6 max-w-5xl mx-auto" data-testid="admin-qa">
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-3xl font-bold">QA</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Pending modules · one-tap decisions
+          </p>
+        </div>
+        <button
+          onClick={load}
+          data-testid="qa-refresh"
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-muted hover:bg-muted/70 text-sm"
+        >
+          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-1 mb-6 bg-zinc-900/60 border border-zinc-800 rounded-xl p-1 w-fit">
-        {['overview', 'providers', 'issues'].map(t => (
-          <button key={t} onClick={() => setTab(t)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === t ? 'bg-white/10 text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
-            data-testid={`tab-${t}`}
-          >{t.charAt(0).toUpperCase() + t.slice(1)}</button>
-        ))}
-      </div>
-
-      {/* OVERVIEW TAB */}
-      {tab === 'overview' && overview && (
-        <div data-testid="qa-overview">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-            <MetricCard label="Health Score" value={`${overview.health_score}%`} icon={<ShieldAlert className="w-4 h-4" />} color={overview.health_score >= 80 ? 'emerald' : overview.health_score >= 50 ? 'amber' : 'red'} testId="health-score" />
-            <MetricCard label="Dispute Rate" value={`${overview.dispute_rate}%`} icon={<AlertTriangle className="w-4 h-4" />} color={overview.dispute_rate < 5 ? 'emerald' : 'red'} testId="dispute-rate" />
-            <MetricCard label="Flagged Providers" value={overview.flagged_providers} icon={<Flag className="w-4 h-4" />} color="amber" testId="flagged-count" />
-            <MetricCard label="Limited Providers" value={overview.limited_providers} icon={<Ban className="w-4 h-4" />} color="red" testId="limited-count" />
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <MetricCard label="Total Providers" value={overview.total_providers} icon={<Users className="w-4 h-4" />} color="blue" />
-            <MetricCard label="Total Bookings" value={overview.total_bookings} icon={<BarChart3 className="w-4 h-4" />} color="violet" />
-            <MetricCard label="Missed Requests" value={overview.total_missed_requests} icon={<TrendingDown className="w-4 h-4" />} color="amber" />
-            <MetricCard label="Low Quality" value={overview.low_quality_providers} icon={<XCircle className="w-4 h-4" />} color="red" />
-          </div>
+      {err && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 mb-4 flex gap-3" data-testid="qa-error">
+          <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
+          <p className="text-red-400 text-sm flex-1">{err}</p>
+          <button
+            onClick={() => { setLoading(true); load(); }}
+            className="px-3 py-1 text-xs bg-muted hover:bg-muted/70 rounded"
+          >Retry</button>
         </div>
       )}
 
-      {/* PROVIDERS TAB */}
-      {tab === 'providers' && (
-        <div data-testid="qa-providers">
-          <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-zinc-800">
-                  <th className="text-left px-4 py-3 text-zinc-500 font-medium">Provider</th>
-                  <th className="text-left px-4 py-3 text-zinc-500 font-medium">Score</th>
-                  <th className="text-left px-4 py-3 text-zinc-500 font-medium">Tier</th>
-                  <th className="text-left px-4 py-3 text-zinc-500 font-medium">Bookings</th>
-                  <th className="text-left px-4 py-3 text-zinc-500 font-medium">Issues</th>
-                  <th className="text-left px-4 py-3 text-zinc-500 font-medium">Lost Revenue</th>
-                  <th className="text-right px-4 py-3 text-zinc-500 font-medium">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {providers.map(p => (
-                  <tr key={p.user_id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30 transition-colors" data-testid={`provider-row-${p.user_id}`}>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        {p.qa_limited && <Ban className="w-3.5 h-3.5 text-red-400" />}
-                        {p.qa_flagged && !p.qa_limited && <Flag className="w-3.5 h-3.5 text-amber-400" />}
-                        <span className="text-white font-medium">{p.name}</span>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${
-                        p.quality_score >= 70 ? 'bg-emerald-500/20 text-emerald-400' :
-                        p.quality_score >= 40 ? 'bg-amber-500/20 text-amber-400' :
-                        'bg-red-500/20 text-red-400'
-                      }`}>{p.quality_score}</span>
-                    </td>
-                    <td className="px-4 py-3 text-zinc-400">{p.tier}</td>
-                    <td className="px-4 py-3 text-zinc-400">{p.total_bookings}</td>
-                    <td className="px-4 py-3">
-                      <span className="text-zinc-400">{p.breakdown?.disputes?.count || 0}d / {p.breakdown?.complaints?.count || 0}c</span>
-                    </td>
-                    <td className="px-4 py-3 text-red-400">{p.lost_revenue > 0 ? `$${p.lost_revenue}` : '-'}</td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        {p.qa_limited ? (
-                          <button onClick={() => handleUnlimit(p.user_id)} disabled={actionLoading[p.user_id]}
-                            className="flex items-center gap-1 px-2 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/20 rounded text-[11px] font-medium text-emerald-400 transition-colors"
-                            data-testid={`unlimit-${p.user_id}`}
-                          ><Unlock className="w-3 h-3" /> Restore</button>
-                        ) : (
-                          <>
-                            {!p.qa_flagged && (
-                              <button onClick={() => handleFlag(p.user_id)} disabled={actionLoading[p.user_id]}
-                                className="flex items-center gap-1 px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/20 rounded text-[11px] font-medium text-amber-400 transition-colors"
-                                data-testid={`flag-${p.user_id}`}
-                              ><Flag className="w-3 h-3" /> Flag</button>
-                            )}
-                            <button onClick={() => handleLimit(p.user_id)} disabled={actionLoading[p.user_id]}
-                              className="flex items-center gap-1 px-2 py-1 bg-red-500/20 hover:bg-red-500/30 border border-red-500/20 rounded text-[11px] font-medium text-red-400 transition-colors"
-                              data-testid={`limit-${p.user_id}`}
-                            ><Lock className="w-3 h-3" /> Limit</button>
-                          </>
+      {loading && !data && (
+        <div className="text-center py-12 text-muted-foreground">Loading QA queue…</div>
+      )}
+
+      {data && data.items.length === 0 && (
+        <div className="bg-card border border-emerald-500/30 rounded-xl p-10 text-center" data-testid="qa-empty">
+          <ShieldCheck className="w-10 h-10 text-emerald-500 mx-auto mb-3" />
+          <p className="text-lg font-bold">QA queue is empty</p>
+          <p className="text-sm text-muted-foreground mt-1">Nothing waiting for review.</p>
+        </div>
+      )}
+
+      {data && data.items.length > 0 && (
+        <>
+          <div className="mb-4 text-xs text-muted-foreground">
+            {data.summary.pending} pending
+            {data.summary.has_more && <span className="ml-1">(truncated)</span>}
+          </div>
+
+          <div className="space-y-3">
+            {data.items.map((item) => {
+              const chip = STATUS_CHIP[item.status] || 'bg-muted text-muted-foreground border-border';
+              const isBusyApprove  = busy === `${item.id}:approve`;
+              const isBusyRevision = busy === `${item.id}:revision`;
+              const isBusyReject   = busy === `${item.id}:reject`;
+              return (
+                <div
+                  key={item.id}
+                  className="bg-card border border-border rounded-xl p-4"
+                  data-testid={`qa-card-${item.id}`}
+                >
+                  <div className="flex items-start gap-4">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <h3 className="font-bold truncate">{item.title}</h3>
+                        <span className={`px-2 py-0.5 text-[11px] rounded border ${chip}`}>
+                          {item.status}
+                        </span>
+                        {item.meta?.revision_count > 0 && (
+                          <span className="px-2 py-0.5 text-[11px] rounded bg-amber-500/20 text-amber-400">
+                            R{item.meta.revision_count}
+                          </span>
                         )}
                       </div>
-                    </td>
-                  </tr>
-                ))}
-                {providers.length === 0 && (
-                  <tr><td colSpan="7" className="px-4 py-8 text-center text-zinc-600">No providers found</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+                      <p className="text-xs text-muted-foreground">{item.subtitle}</p>
+                      <div className="flex items-center gap-4 mt-2 text-xs">
+                        {item.meta?.client_price > 0 && (
+                          <span className="font-bold text-[#2FE6A6]">
+                            ${Math.round(item.meta.client_price)}
+                          </span>
+                        )}
+                        {item.created_at && (
+                          <span className="text-muted-foreground">
+                            {String(item.created_at).slice(0, 19).replace('T', ' ')}
+                          </span>
+                        )}
+                      </div>
+                    </div>
 
-      {/* ISSUES TAB */}
-      {tab === 'issues' && (
-        <div className="space-y-2" data-testid="qa-issues">
-          {issues.length === 0 && (
-            <div className="text-center py-12 bg-zinc-900/40 border border-zinc-800 rounded-xl">
-              <CheckCircle2 className="w-10 h-10 text-emerald-500 mx-auto mb-3" />
-              <p className="text-zinc-400">No quality issues detected</p>
-            </div>
-          )}
-          {issues.map(issue => (
-            <div key={issue.issue_id} className={`flex items-center justify-between bg-zinc-900/60 border rounded-xl px-4 py-3 ${
-              issue.severity === 'critical' ? 'border-red-500/30' : issue.severity === 'high' ? 'border-orange-500/20' : 'border-zinc-800'
-            }`} data-testid={`issue-${issue.issue_id}`}>
-              <div className="flex items-center gap-3">
-                <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${
-                  issue.severity === 'critical' ? 'bg-red-500/20 text-red-400' :
-                  issue.severity === 'high' ? 'bg-orange-500/20 text-orange-400' :
-                  'bg-amber-500/20 text-amber-400'
-                }`}>{issue.severity}</span>
-                <div>
-                  <p className="text-sm text-white">{issue.type === 'dispute' ? 'Dispute' : issue.type === 'complaint' ? 'Complaint' : 'Auto-flagged'}: <span className="text-zinc-400">{issue.provider_name}</span></p>
-                  {issue.message && <p className="text-xs text-zinc-500 mt-0.5">{issue.message}</p>}
+                    <div className="flex gap-2 shrink-0">
+                      {item.actions.includes('approve') && (
+                        <button
+                          onClick={() => decide(item, 'approve')}
+                          disabled={busy !== null}
+                          data-testid={`qa-approve-${item.id}`}
+                          className="px-3 py-1.5 text-xs bg-[#2FE6A6] hover:bg-[#4ef0b6] text-black font-bold rounded disabled:opacity-50 flex items-center gap-1"
+                        >
+                          <CheckCircle2 className="w-3 h-3" />
+                          {isBusyApprove ? 'Approving…' : 'Approve'}
+                        </button>
+                      )}
+                      {item.actions.includes('revision') && (
+                        <button
+                          onClick={() => decide(item, 'revision')}
+                          disabled={busy !== null}
+                          data-testid={`qa-revision-${item.id}`}
+                          className="px-3 py-1.5 text-xs bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 font-bold rounded border border-amber-500/40 disabled:opacity-50 flex items-center gap-1"
+                        >
+                          <RotateCw className="w-3 h-3" />
+                          {isBusyRevision ? 'Sending…' : 'Revision'}
+                        </button>
+                      )}
+                      {item.actions.includes('reject') && (
+                        <button
+                          onClick={() => decide(item, 'reject')}
+                          disabled={busy !== null}
+                          data-testid={`qa-reject-${item.id}`}
+                          className="px-3 py-1.5 text-xs bg-red-500/20 hover:bg-red-500/30 text-red-400 font-bold rounded border border-red-500/40 disabled:opacity-50 flex items-center gap-1"
+                        >
+                          <XCircle className="w-3 h-3" />
+                          {isBusyReject ? 'Rejecting…' : 'Reject'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {item.web_url && (
+                    <a
+                      href={item.web_url}
+                      className="inline-flex items-center gap-1 mt-3 pt-3 border-t border-border text-xs text-[#2FE6A6] hover:text-[#4ef0b6]"
+                      data-testid={`qa-open-${item.id}`}
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      Open details
+                      <ArrowRight className="w-3 h-3" />
+                    </a>
+                  )}
                 </div>
-              </div>
-              {issue.amount > 0 && <span className="text-sm font-medium text-red-400">${issue.amount}</span>}
-            </div>
-          ))}
-        </div>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );
-};
-
-const MetricCard = ({ label, value, icon, color, testId }) => {
-  const colors = {
-    emerald: 'from-emerald-500/10 to-emerald-500/5 border-emerald-500/20 text-emerald-400',
-    amber: 'from-amber-500/10 to-amber-500/5 border-amber-500/20 text-amber-400',
-    red: 'from-red-500/10 to-red-500/5 border-red-500/20 text-red-400',
-    blue: 'from-blue-500/10 to-blue-500/5 border-blue-500/20 text-blue-400',
-    violet: 'from-violet-500/10 to-violet-500/5 border-violet-500/20 text-violet-400'
-  };
-  return (
-    <div className={`bg-gradient-to-br ${colors[color]} border rounded-xl p-4`} data-testid={testId}>
-      <div className="flex items-center gap-2 mb-2 opacity-70">{icon}<span className="text-[11px] uppercase tracking-wider font-medium">{label}</span></div>
-      <p className="text-2xl font-bold text-white">{value}</p>
-    </div>
-  );
-};
-
-export default AdminQAPage;
+}
