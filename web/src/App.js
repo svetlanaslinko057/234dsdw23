@@ -25,7 +25,6 @@ import AdminV2Finance from "@/pages/AdminV2Finance";
 import AdminV2Team from "@/pages/AdminV2Team";
 import AdminV2System from "@/pages/AdminV2System";
 import AdminV2Profile from "@/pages/AdminV2Profile";
-import AdminCockpit from "@/pages/AdminCockpit";
 import NewRequest from "@/pages/NewRequest";
 import ProjectDetails from "@/pages/ProjectDetails";
 import ScopeBuilder from "@/pages/ScopeBuilder";
@@ -56,8 +55,6 @@ import TesterIssues from "@/pages/TesterIssues";
 import TesterPerformance from "@/pages/TesterPerformance";
 
 // Admin Control Center
-import AdminControlCenter from "@/pages/AdminControlCenter";
-import AdminControlCenter2 from "@/pages/AdminControlCenter2";
 import AdminProjectWarRoom from "@/pages/AdminProjectWarRoom";
 import AdminDeveloperProfile from "@/pages/AdminDeveloperProfile";
 import AdminGrowthPage from "@/pages/AdminGrowthPage";
@@ -106,9 +103,8 @@ import AdminInboxPage from "@/pages/AdminInboxPage";
 // Admin Users (Phase 1 Step B — Identity Control Panel)
 import AdminUsersPage from "@/pages/AdminUsersPage";
 
-// Admin QA & Margin
+// Admin QA
 import AdminQAPage from "@/pages/AdminQAPage";
-import AdminMarginPage from "@/pages/AdminMarginPage";
 
 // Developer Workspace & Client Cabinet (Production Operations)
 import DeveloperWorkspace from "@/pages/DeveloperWorkspace";
@@ -137,10 +133,6 @@ import AdminTimeControl from "@/pages/AdminTimeControl";
 
 // Earnings UI (Step 3D)
 import DeveloperEarnings from "@/pages/DeveloperEarnings";
-
-// Profit Intelligence (Step 4)
-import AdminProfitControl from "@/pages/AdminProfitControl";
-import AdminUnderpricedControl from "@/pages/AdminUnderpricedControl";
 
 // ATLAS DevOS — Client layer pages (restored + new)
 import ClientCosts from "@/pages/ClientCosts";
