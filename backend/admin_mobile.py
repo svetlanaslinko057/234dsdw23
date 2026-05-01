@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Body
@@ -819,6 +819,193 @@ def init_router(db, get_current_user_dep, require_role_dep, realtime=None):
                 "blocked": blocked_n,
                 "done": done_n,
                 "has_more": has_more,
+            },
+            "generated_at": _iso_now(),
+        }
+
+    # ============================================================
+    # VISIBILITY — pressure / risks / recent system actions
+    # ============================================================
+    # Lazy import inside handler so admin_mobile stays importable
+    # in environments where reputation_decay/team_balancer are absent.
+    @router.get("/admin/mobile/visibility")
+    async def visibility(user=Depends(require_admin)) -> Dict[str, Any]:
+        """Signal-only feed for /admin/dashboard.
+        NO charts, NO analytics — only items the admin can act on.
+        """
+        try:
+            from reputation_decay import apply_decay  # type: ignore
+        except Exception:
+            def apply_decay(_last_active, now=None):  # noqa
+                return 0
+
+        try:
+            from team_balancer import calculate_dev_pressure  # type: ignore
+        except Exception:
+            def calculate_dev_pressure(active, avg, decay):  # noqa
+                base = max(avg, 1.0)
+                return round((active / base) * 0.6 + (min(decay, 15) / 15) * 0.4, 3)
+
+        now = datetime.now(timezone.utc)
+
+        # ----------------------------------------------------------
+        # 1) PRESSURE — top developers with active_modules vs decay
+        # ----------------------------------------------------------
+        # Aggregate active modules per developer
+        agg = await db.modules.aggregate([
+            {"$match": {"status": {"$in": list(WF_ACTIVE)},
+                        "assigned_to": {"$ne": None}}},
+            {"$group": {"_id": "$assigned_to", "active": {"$sum": 1}}},
+        ]).to_list(500)
+
+        active_map = {a["_id"]: a["active"] for a in agg if a.get("_id")}
+        if active_map:
+            avg_active = sum(active_map.values()) / max(len(active_map), 1)
+        else:
+            avg_active = 0.0
+
+        dev_ids = list(active_map.keys())
+        devs: List[Dict[str, Any]] = []
+        if dev_ids:
+            devs = await db.users.find(
+                {"user_id": {"$in": dev_ids}},
+                {"_id": 0, "user_id": 1, "name": 1, "last_active_at": 1, "capacity": 1},
+            ).to_list(500)
+
+        pressure_rows: List[Dict[str, Any]] = []
+        overloaded_decaying: List[Dict[str, Any]] = []
+        for d in devs:
+            uid = d["user_id"]
+            active = active_map.get(uid, 0)
+            decay = int(apply_decay(d.get("last_active_at"), now=now) or 0)
+            pscore = float(calculate_dev_pressure(active, avg_active, decay) or 0.0)
+            if pscore >= 0.8:
+                risk = "high"
+            elif pscore >= 0.6:
+                risk = "medium"
+            else:
+                risk = "low"
+            row = {
+                "developer_id": uid,
+                "name": d.get("name") or "Developer",
+                "active_modules": active,
+                "decay_penalty": decay,
+                "pressure_score": round(pscore, 2),
+                "risk": risk,
+            }
+            pressure_rows.append(row)
+            if risk in ("high", "medium") and decay >= 5:
+                overloaded_decaying.append(row)
+
+        pressure_rows.sort(key=lambda r: r["pressure_score"], reverse=True)
+        pressure_top = pressure_rows[:3]
+
+        # ----------------------------------------------------------
+        # 2) RISKS — 3 buckets: overload+decay, stuck modules, qa stagnation
+        # ----------------------------------------------------------
+        risks: List[Dict[str, Any]] = []
+
+        # 2a) overloaded + decaying devs (already computed)
+        for r in overloaded_decaying[:3]:
+            risks.append({
+                "id": f"risk_overload_{r['developer_id']}",
+                "type": "overloaded_dev",
+                "title": f"{r['name']} is overloaded & inactive",
+                "subtitle": f"{r['active_modules']} modules · decay {r['decay_penalty']} · pressure {r['pressure_score']}",
+                "severity": r["risk"],
+                "web_url": _web_url(f"/admin/team?dev={r['developer_id']}"),
+            })
+
+        # 2b) stuck modules (in_progress with old created_at and no submission)
+        # Use ISO string compare since created_at is stored as string
+        threshold_5d = (now - timedelta(days=5)).isoformat()
+        threshold_7d = (now - timedelta(days=7)).isoformat()
+        stuck = await db.modules.find(
+            {
+                "status": "in_progress",
+                "created_at": {"$lt": threshold_5d},
+                "qa_decided_at": {"$in": [None, ""]},
+            },
+            {"_id": 0, "module_id": 1, "title": 1, "assigned_to": 1, "created_at": 1},
+        ).limit(5).to_list(5)
+        for m in stuck:
+            sev = "high" if (m.get("created_at") or "") < threshold_7d else "medium"
+            dev_name = ""
+            if m.get("assigned_to"):
+                u = next((x for x in devs if x.get("user_id") == m["assigned_to"]), None)
+                dev_name = (u or {}).get("name", "")
+            risks.append({
+                "id": f"risk_stuck_{m['module_id']}",
+                "type": "stuck_module",
+                "title": f"Module stuck: {m.get('title') or 'Untitled'}",
+                "subtitle": f"in_progress · {dev_name or 'unassigned'}",
+                "severity": sev,
+                "web_url": _web_url(f"/admin/workflow?module_id={m['module_id']}"),
+            })
+
+        # 2c) qa stagnation (review status with old submitted_at)
+        threshold_2d = (now - timedelta(days=2)).isoformat()
+        threshold_5d_qa = (now - timedelta(days=5)).isoformat()
+        stagnant = await db.modules.find(
+            {
+                "status": {"$in": list(QA_AWAITING_DECISION)},
+                "submitted_at": {"$lt": threshold_2d},
+            },
+            {"_id": 0, "module_id": 1, "title": 1, "submitted_at": 1},
+        ).limit(5).to_list(5)
+        for m in stagnant:
+            sev = "high" if (m.get("submitted_at") or "") < threshold_5d_qa else "medium"
+            risks.append({
+                "id": f"risk_qa_{m['module_id']}",
+                "type": "qa_stagnation",
+                "title": f"QA stagnant: {m.get('title') or 'Untitled'}",
+                "subtitle": "Awaiting admin decision >2d",
+                "severity": sev,
+                "web_url": _web_url(f"/admin/qa?module_id={m['module_id']}"),
+            })
+
+        # Sort risks: high severity first
+        sev_order = {"high": 0, "medium": 1, "low": 2}
+        risks.sort(key=lambda r: sev_order.get(r.get("severity", "low"), 3))
+        risks_top = risks[:5]
+
+        # ----------------------------------------------------------
+        # 3) SYSTEM ACTIONS — what the system did automatically
+        # ----------------------------------------------------------
+        # Show last 5 actions from non-admin sources (system_decisions).
+        sys_rows = await db.system_actions_log.find(
+            {"source": {"$ne": "admin_mobile"}},
+            {"_id": 0},
+        ).sort("created_at", -1).limit(5).to_list(5)
+
+        system_actions: List[Dict[str, Any]] = []
+        for r in sys_rows:
+            payload = r.get("payload") or {}
+            action = r.get("action") or ""
+            if action == "auto_reassign":
+                title = f'Auto-rebalanced "{payload.get("module_title") or "module"}"'
+                subtitle = f'from {payload.get("from_dev_name") or "—"} → {payload.get("to_dev_name") or "—"} · {payload.get("reason") or ""}'
+            else:
+                title = f'{action}: {r.get("entity_type") or ""} {r.get("entity_id") or ""}'
+                subtitle = r.get("source") or ""
+            system_actions.append({
+                "id": r.get("log_id") or "",
+                "action": action,
+                "title": title,
+                "subtitle": subtitle,
+                "source": r.get("source") or "",
+                "created_at": r.get("created_at"),
+            })
+
+        return {
+            "pressure": pressure_top,
+            "risks": risks_top,
+            "system_actions": system_actions,
+            "summary": {
+                "tracked_devs": len(pressure_rows),
+                "overloaded_decaying": len(overloaded_decaying),
+                "risks_total": len(risks),
+                "avg_active_modules": round(avg_active, 2),
             },
             "generated_at": _iso_now(),
         }
